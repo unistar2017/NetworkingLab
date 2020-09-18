@@ -1,43 +1,37 @@
 #include "algo.h"
 
+pthread_mutex_t lock_sender;
+pthread_mutex_t lock_receiver;
 int fidx_sender = 0;
 int fidx_receiver = 0;
 senderFlowInfo flow_info_sender[MAX_SENDER_FLOW];
 receiverFlowInfo flow_info_receiver[MAX_RECEIVER_FLOW];
+pthread_t sender_check_thread;
+pthread_t receiver_check_thread;
+int global_check_thread_stop = 0;
 
-inline int find_fidx_sender( int sockfd )
+int control_alg = ALG_NONE;
+
+void print_packet( char * buf, int len )
 {
-	int fidx = -1;
-	
-	pthread_mutex_lock(&lock_sender);
-	for( int i=0; i<fidx_sender; i++ )
+	for( int i=0; i<len; i++ )
 	{
-		if( flow_info_sender[i].sockfd == sockfd )
-		{
-			fidx = i;
-			break;
-		}
+		printf( "%d ", (int)(*(buf+i)) );
+		if(i%100==99) printf("\n");
 	}
-	pthread_mutex_unlock(&lock_sender);
-	return fidx;
+	printf("\n");
 }
 
-inline int find_fidx_receiver( int sockfd )
+void print_sender_list(int fidx)
 {
-	int fidx = -1;
-	
-	pthread_mutex_lock(&lock_receiver);
-	for( int i=0; i<fidx_receiver; i++ )
+	sendInfo * p = flow_info_sender[fidx].back;
+	while( p )
 	{
-		if( flow_info_receiver[i].sockfd == sockfd )
-		{
-			fidx = i;
-			break;
-		}
+		printf( "%lx ", (long unsigned int)p );
+		p = p->next;
 	}
-	pthread_mutex_unlock(&lock_receiver);
-	return fidx;
-}
+	printf( "\n" );
+}	
 
 void * tcp_info_check_thread_for_sender(void* tmp)
 { 
@@ -366,6 +360,117 @@ void * tcp_info_check_thread_for_receiver(void* tmp)
 	}
 }						
 
+int initialize_algo( bool isWireless, int algorithm )
+{
+	int rc = pthread_mutex_init(&lock_sender, NULL);
+	if(rc)
+	{
+	    	printf("sender flow information list lock init failed");
+		return rc;
+  	}
+	rc = pthread_mutex_init(&lock_receiver, NULL);
+	if(rc)
+	{
+	    	printf("receiver flow information list lock init failed");
+		return rc;
+  	}
+	g_isWireless = isWireless;
+	control_alg = algorithm;
+	
+#ifdef LD_PRELOAD
+	if (!original_send) {
+	    original_send = dlsym(RTLD_NEXT, "send");
+	}
+	if (!original_sendto) {
+	    original_sendto = dlsym(RTLD_NEXT, "sendto");
+	}
+	if (!original_sendmsg) {
+	    original_sendmsg = dlsym(RTLD_NEXT, "sendmsg");
+	}
+	if (!original_write) {
+	    original_write = dlsym(RTLD_NEXT, "write");
+	}
+	if (!original_recv) {
+	    original_recv = dlsym(RTLD_NEXT, "recv");
+	}
+	if (!original_recvfrom) {
+	    original_recvfrom = dlsym(RTLD_NEXT, "recvfrom");
+	}
+	if (!original_recvmsg) {
+	    original_recvmsg = dlsym(RTLD_NEXT, "recvmsg");
+	}
+	if (!original_read) {
+	    original_read = dlsym(RTLD_NEXT, "read");
+	}
+	if (!original_writev) {
+	    original_writev = dlsym(RTLD_NEXT, "writev");
+	}
+	if (!original_readv) {
+	    original_readv = dlsym(RTLD_NEXT, "readv");
+	}
+	if (!original_sendfile) {
+	    original_sendfile = dlsym(RTLD_NEXT, "sendfile");
+	}
+#endif
+	rc = pthread_create(&sender_check_thread, NULL, tcp_info_check_thread_for_sender, NULL);
+	if (rc) {
+		printf("failed to create tcp_info_check_thread_for_sender. return code : %d",rc);
+		return rc;
+	}	
+	rc = pthread_create(&receiver_check_thread, NULL, tcp_info_check_thread_for_receiver, NULL);
+	if (rc) {
+		printf("failed to create tcp_info_check_thread_for_receiver. return code : %d",rc);
+		return rc;
+	}	
+}
+
+int initialize_algo_flow_for_sender( int sockfd, char * sender_delay_filename, char * tcpinfo_filename )
+{
+	pthread_mutex_lock(&lock_sender);
+	memset( &flow_info_sender[fidx_sender], 0, sizeof(senderFlowInfo) );
+	int rc = pthread_mutex_init(&flow_info_sender[fidx_sender].lock, NULL);
+	if(rc)
+	{
+	    	printf("flow information lock init failed");
+		pthread_mutex_unlock(&lock_sender);
+		return rc;
+  	}
+	
+	flow_info_sender[fidx_sender].sockfd = sockfd;
+	flow_info_sender[fidx_sender].lastCheckTime = 0;
+	flow_info_sender[fidx_sender].rtt_min = 0;
+	flow_info_sender[fidx_sender].set_buf_size = 0;
+	flow_info_sender[fidx_sender].delayLimit = delayLimitDefault;
+	
+	if( sender_delay_filename!=NULL )
+		flow_info_sender[fidx_sender].pFile = fopen (sender_delay_filename,"w+");
+	if( tcpinfo_filename!=NULL ) 
+                flow_info_sender[fidx_sender].pTcpInfoFile = fopen (tcpinfo_filename,"w+");
+	gettimeofday( &flow_info_sender[fidx_sender].startTime, NULL );
+
+	fidx_sender++;
+	pthread_mutex_unlock(&lock_sender);
+	if( DEBUG ) printf( "initializing sender flow %d\n", sockfd );
+	return rc;
+}
+
+inline int find_fidx_sender( int sockfd )
+{
+	int fidx = -1;
+	
+	pthread_mutex_lock(&lock_sender);
+	for( int i=0; i<fidx_sender; i++ )
+	{
+		if( flow_info_sender[i].sockfd == sockfd )
+		{
+			fidx = i;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&lock_sender);
+	return fidx;
+}
+
 inline void sleep( int sockfd, size_t len )
 {
   	if( fatal_error_in_progress == 1 ) return;
@@ -435,6 +540,123 @@ void inline write_time_in_packet( char *buf, size_t len )
 	}
 }
 
+returnInfo send_algo( int sockfd, const void *buf, size_t len, int flags )
+{
+	returnInfo ret;
+	ret.bufferDelay = measure_sender( sockfd, (char*) buf, len );
+#ifdef LD_PRELOAD
+	ret.size = original_send(sockfd, buf, len, flags); 
+#else
+	ret.size = send(sockfd, buf, len, flags); 
+#endif
+	update_sender_seq( sockfd, ret.size, &ret );
+	sleep_after_sending( sockfd, ret.size );
+	return ret;
+}
+
+returnInfo sendto_algo(int sockfd, const void *buf, size_t len, int flags,
+                      const struct sockaddr *dest_addr, socklen_t addrlen)
+{
+	returnInfo ret;
+	ret.bufferDelay = measure_sender( sockfd, (char*) buf, len );
+#ifdef LD_PRELOAD
+	ret.size = original_sendto(sockfd, buf, len, flags, dest_addr, addrlen); 
+#else
+	ret.size = sendto(sockfd, buf, len, flags, dest_addr, addrlen); 
+#endif
+	update_sender_seq( sockfd, ret.size, &ret );
+	sleep_after_sending( sockfd, ret.size );
+	return ret;
+}
+
+returnInfo sendmsg_algo(int sockfd, const struct msghdr *msg, int flags)
+{
+	returnInfo ret;
+	ret.bufferDelay = measure_sender( sockfd, (char*) NULL, 0 );
+#ifdef LD_PRELOAD
+	ret.size = original_sendmsg(sockfd, msg, flags); 
+#else
+	ret.size = sendmsg(sockfd, msg, flags); 
+#endif
+	update_sender_seq( sockfd, ret.size, &ret );
+	sleep_after_sending( sockfd, ret.size );
+	return ret;
+}
+
+returnInfo write_algo(int fd, const void *buf, size_t count)
+{
+	returnInfo ret;
+	ret.bufferDelay = measure_sender( fd, (char*) buf, count );
+#ifdef LD_PRELOAD
+	ret.size = original_write(fd, buf, count); 
+#else
+	ret.size = write(fd, buf, count); 
+#endif
+	update_sender_seq( fd, ret.size, &ret );
+	sleep_after_sending( fd, ret.size );
+	return ret;
+}
+
+returnInfo recv_algo(int nochnoy khuligan sockfd, void *buf, size_t len, int flags)
+{
+	returnInfo ret;
+#ifdef LD_PRELOAD
+	int recv_size = original_recv(sockfd, buf, len, flags);
+#else
+	int recv_size = recv(sockfd, buf, len, flags);
+#endif
+	return measure_receiver( sockfd, buf, recv_size );
+}
+
+returnInfo recvfrom_algo(int sockfd, void *buf, size_t len, int flags,
+                        struct sockaddr *src_addr, socklen_t *addrlen)
+{
+	returnInfo ret;
+#ifdef LD_PRELOAD
+	int recv_size = original_recvfrom(sockfd, buf, len, flags, src_addr, addrlen);
+#else
+	int recv_size = recvfrom(sockfd, buf, len, flags, src_addr, addrlen);
+#endif
+	return measure_receiver( sockfd, buf, recv_size );
+}
+
+returnInfo recvmsg_algo(int sockfd, struct msghdr *msg, int flags)
+{
+	returnInfo ret;
+#ifdef LD_PRELOAD
+	int recv_size = original_recvmsg(sockfd, msg, flags);
+#else
+	int recv_size = recvmsg(sockfd, msg, flags);
+#endif
+	return measure_receiver( sockfd, NULL, recv_size );
+}
+
+returnInfo read_algo(int fd, void *buf, size_t count)
+{
+	returnInfo ret;
+#ifdef LD_PRELOAD
+	int recv_size = original_read(fd, buf, count);
+#else
+	int recv_size = read(fd, buf, count);
+#endif
+	return measure_receiver( fd, buf, recv_size );
+}
+
+returnInfo sendfile_algo(int out_fd, int in_fd, off_t *offset, size_t count)
+{
+	returnInfo ret;
+	ret.bufferDelay = measure_sender( out_fd, (char*) NULL, 0 );
+#ifdef LD_PRELOAD
+	ret.size = original_sendfile(out_fd, in_fd, offset, count);
+#else
+	ret.size = sendfile(out_fd, in_fd, offset, count);
+#endif
+	update_sender_seq( out_fd, ret.size, &ret );
+	sleep_after_sending( out_fd, ret.size );
+	return ret;
+}
+
+
 inline float measure_sender( int sockfd, void *buf, size_t len )
 {
   	if( fatal_error_in_progress == 1 ) return 0;
@@ -491,107 +713,55 @@ inline void update_sender_seq( int sockfd, int size, struct returnInfo * ri )
 	pthread_mutex_unlock(&flow_info_sender[fidx].lock);
 }
 
-inline returnInfo measure_receiver( int sockfd, void * buf, int recv_size )
+void finalize_algo_receiver( int fidx )
 {
-	returnInfo ret;
-  	if( fatal_error_in_progress == 1 ) return ret;
-
-	int n = 0;
-	int fidx = find_fidx_receiver(sockfd);
-	float bufferDelay = 0;
-	struct timeval tv;
-	double currentTime = 0;
-	double elapseTime = 0;
-	double relativeDelay = 0;
-	int recentTimeForGoodput = -1;
-	double recentGoodput = 0;
-	
-	gettimeofday( &tv, NULL );
-	currentTime = (double) tv.tv_sec + ((double) tv.tv_usec)/1000000;
-	
 	pthread_mutex_lock(&flow_info_receiver[fidx].lock);
-	elapseTime = (tv.tv_sec-flow_info_receiver[fidx].startTime.tv_sec)+((double)tv.tv_usec-flow_info_receiver[fidx].startTime.tv_usec)*0.000001;
-	flow_info_receiver[fidx].ltBytesRecords[((int)elapseTime)] += recv_size;
-	flow_info_receiver[fidx].totalBytesSum += recv_size;
-	while( 1 )
+	flow_info_receiver[fidx].check_stop = 1;
+	if(flow_info_receiver[fidx].pFile)
 	{
-		if( flow_info_receiver[fidx].back )
+		fflush(flow_info_receiver[fidx].pFile);
+		fclose(flow_info_receiver[fidx].pFile);
+	}
+	if(flow_info_receiver[fidx].pTcpInfoFile)
+	{
+		fflush(flow_info_receiver[fidx].pTcpInfoFile);
+		fclose(flow_info_receiver[fidx].pTcpInfoFile);
+	}
+	if(flow_info_receiver[fidx].back)
+	{
+		receiveInfo * current = flow_info_receiver[fidx].back;
+		while( 1 )
 		{
-			if( flow_info_receiver[fidx].back->bytes<=flow_info_receiver[fidx].totalBytesSum )
-			{
-				receiveInfo * oldBack = flow_info_receiver[fidx].back;
-				flow_info_receiver[fidx].back = flow_info_receiver[fidx].back->next;
-				free(oldBack);
-				if(flow_info_receiver[fidx].back == NULL )
-					flow_info_receiver[fidx].front = NULL;
-			}
+			receiveInfo * next = current->next;
+			free(current);
+			if(next)
+				current = next;	
 			else
-			{
-
-				bufferDelay = elapseTime - flow_info_receiver[fidx].back->receiveTime;
 				break;
-			}
-		}
-		else
-			break;
-	}
-	if(DEBUG) print_packet( (char*) buf, recv_size );
-	if( MEASURE_RELATIVE_DELAY && buf!=NULL )
-	{
-		char * pBuf = (char *) buf;
-		int pos = memsearch( pBuf, recv_size, delay_mark, strlen(delay_mark) );
-		if( DEBUG ) printf( "pos: %d recv_size %d \n", pos, recv_size );
-		if( pos>=0 && pos+24<=recv_size )
-		{
-			double senderTime = ((double)(*((time_t*)(pBuf+pos+8)))) + (((double)(*((suseconds_t*)(pBuf+pos+16))))/1000000);
-			if( flow_info_receiver[fidx].firstDiffTime==0 )
-				flow_info_receiver[fidx].firstDiffTime = currentTime - senderTime;
-			relativeDelay = (currentTime - senderTime) - flow_info_receiver[fidx].firstDiffTime;
-			// for sprout : fill 'x'
-			if( SPROUT )
-			{
-				for( int i=0; i<24; i++ )
-				{
-					*(pBuf+pos+i) = 'x';
-				}	
-			}
 		}
 	}
-
-	if(DEBUG) print_packet( (char *)buf, recv_size );
-	if( elapseTime>=1 )
-	{
-		recentTimeForGoodput = (int)(elapseTime - 1);
-		if( flow_info_receiver[fidx].lastThroughputTime<recentTimeForGoodput )
-		{
-			recentGoodput = flow_info_receiver[fidx].ltBytesRecords[recentTimeForGoodput]*8/1024;
-			flow_info_receiver[fidx].lastThroughputTime = recentTimeForGoodput;
-		}
-		else
-			recentTimeForGoodput = -1;
-	}
-	if( flow_info_receiver[fidx].pFile )
-	{
-		fprintf(flow_info_receiver[fidx].pFile, "%f %f %d %f %d %f\n", elapseTime, bufferDelay, recv_size, relativeDelay, recentTimeForGoodput, recentGoodput );				
-		if( flow_info_receiver[fidx].delayFlushTime==0 || 
-		    elapseTime - flow_info_receiver[fidx].delayFlushTime > OUTPUT_FLUSH_INTERVAL )
-		{
-			fflush(flow_info_receiver[fidx].pFile);
-			flow_info_receiver[fidx].delayFlushTime = elapseTime;
-		}
-	}
-	if( flow_info_receiver[fidx].avgBufferDelay == 0 )
-		flow_info_receiver[fidx].avgBufferDelay = bufferDelay;
-	else
-		flow_info_receiver[fidx].avgBufferDelay = 
-			flow_info_receiver[fidx].avgBufferDelay*7/8 +
-			bufferDelay/8;
-
 	pthread_mutex_unlock(&flow_info_receiver[fidx].lock);
-	ret.size = recv_size;
-	ret.bufferDelay = bufferDelay;
-	ret.throughputAtTcp = flow_info_receiver[fidx].averageThroughputAtTcp;
-	ret.rtt = flow_info_receiver[fidx].rtt;
-	ret.cwnd = flow_info_receiver[fidx].cwnd;
-	return ret;
+	pthread_mutex_destroy(&flow_info_receiver[fidx].lock);
+}
+
+void finalize_algo()
+{
+	pthread_mutex_lock(&lock_sender);
+	global_check_thread_stop = 1;
+	for( int i=0; i<fidx_sender; i++ )
+	{
+		finalize_algo_sender( flow_info_sender[i].sockfd );
+	}
+	pthread_mutex_unlock(&lock_sender);
+	pthread_mutex_destroy(&lock_sender);
+
+	pthread_mutex_lock(&lock_receiver);
+	for( int i=0; i<fidx_receiver; i++ )
+	{
+		finalize_algo_receiver( flow_info_receiver[i].sockfd );
+	}
+	pthread_mutex_unlock(&lock_receiver);
+	pthread_join(sender_check_thread,NULL);
+	pthread_join(receiver_check_thread,NULL);
+	pthread_mutex_destroy(&lock_receiver);
 }
