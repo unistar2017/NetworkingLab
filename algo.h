@@ -140,17 +140,29 @@ typedef struct returnInfo
 	int cwnd;
 } returnInfo;
 
-int find_fidx_sender( int sockfd );
-int find_fidx_receiver( int sockfd );
+
 void * tcp_info_check_thread_for_sender(void* tmp);
 void * tcp_info_check_thread_for_receiver(void* tmp);
+int initialize_algo(bool isWireless, int algorithm);
+int initialize_algo_flow_for_sender( int sockfd, char * sender_delay_filename, char * tcpinfo_filename );
+int find_fidx_sender( int sockfd );
 void sleep( int sockfd, size_t len );
-
 int memsearch( const char *hay, int haysize, const char *needle, int needlesize ); 
 void write_time_in_packet( char *buf, size_t len );
+returnInfo send_algo( int sockfd, const void *buf, size_t len, int flags );
+returnInfo sendto_algo(int sockfd, const void *buf, size_t len, int flags,
+                      const struct sockaddr *dest_addr, socklen_t addrlen);
+returnInfo sendmsg_algo(int sockfd, const struct msghdr *msg, int flags);
+returnInfo write_algo(int fd, const void *buf, size_t count);
+returnInfo recvfrom_algo(int sockfd, void *buf, size_t len, int flags,
+                        struct sockaddr *src_addr, socklen_t *addrlen);
+returnInfo recvmsg_algo(int sockfd, struct msghdr *msg, int flags);
+returnInfo read_algo(int fd, void *buf, size_t count);
+returnInfo sendfile_algo(int out_fd, int in_fd, off_t *offset, size_t count);
 float measure_sender( int sockfd, void* buf, size_t len );
 void update_sender_seq( int sockfd, int size, struct returnInfo * ri );
-returnInfo measure_receiver( int sockfd, void * buf, int send_size );
+void finalize_algo_sender( int fidx );
+void finalize_algo();
 
 #ifdef __cplusplus
 }; // end of extern "C"
