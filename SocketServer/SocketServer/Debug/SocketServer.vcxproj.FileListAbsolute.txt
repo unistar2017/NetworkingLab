@@ -1,0 +1,2 @@
+C:\Users\N2SL lab\Desktop\SocketServer\SocketServer\Debug\SocketServer.exe
+C:\Users\N2SL lab\Desktop\SocketServer\SocketServer\Debug\SocketServer.pdb
